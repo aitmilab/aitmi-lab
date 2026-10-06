@@ -1,0 +1,26 @@
+{
+  "name": "@aitmi/lab",
+  "version": "0.1.0",
+  "description": "Open-source local AI harness, provider connection foundations, and privacy-safe extension toolkit",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": false,
+  "homepage": "https://github.com/aitmilab/aitmi-lab#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aitmilab/aitmi-lab.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aitmilab/aitmi-lab/issues"
+  },
+  "files": ["src", "README.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "RELEASE.md", "LICENSE", "NOTICE", "SECURITY.md"],
+  "bin": {
+    "aitmi-lab": "src/cli.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
