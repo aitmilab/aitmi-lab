@@ -2,7 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createChatGPTLabFlow } from "../src/chatgpt.mjs";
 
-function setup(scope = "chatgpt.tokens.use.direct", extra = {}) {
+test("failed sign-in reports only the failing stage without exposing provider errors", async () => {
+  for (const [override, reason] of [
+    [{ openBrowser: async () => { throw new Error("private-browser-marker"); } }, "browser-unavailable"],
+    [{ exchange: async () => { throw new Error("private-token-marker"); } }, "token-exchange-failed"],
+    [{ verifyIdentity: async () => { throw new Error("private-identity-marker"); } }, "identity-verification-failed"],
+  ]) {
+    const s = setup("chatgpt.tokens.use.direct resource.invoke", override);
+    const begun = await s.flow.begin();
+    if (begun.ok) await s.flow.complete(s.callback());
+    assert.equal(s.flow.status().state, "unavailable");
+    assert.equal(s.flow.status().reason, reason);
+    assert.equal(JSON.stringify(s.flow.status()).includes("private-"), false);
+    assert.equal(s.stored.length, 0);
+  }
+});
+
+function setup(scope = "chatgpt.tokens.use.direct resource.invoke", extra = {}) {
   let url;
   const stored = [];
   let exchanges = 0;
@@ -33,6 +49,12 @@ test("identity alone cannot activate plan usage", async () => {
   assert.deepEqual(s.flow.status(), { provider: "chatgpt", state: "limited" });
   assert.equal(s.stored.length, 0);
 });
+test("plan-use scope without Responses resource permission cannot activate inference", async () => {
+  const s = setup("openid chatgpt.tokens.use.direct"); await s.flow.begin();
+  assert.deepEqual(await s.flow.complete(s.callback()), { ok: false });
+  assert.deepEqual(s.flow.status(), { provider: "chatgpt", state: "limited" });
+  assert.equal(s.stored.length, 0);
+});
 test("expired attempt and failed identity verification do not store tokens", async () => {
   let now = 0;
   const s = setup(undefined, { now: () => now }); await s.flow.begin(); now = 300001;
@@ -57,7 +79,7 @@ test("disconnect during token exchange prevents late activation", async () => {
   const s = setup(undefined, { exchange: () => new Promise((resolve) => { finish = resolve; }) });
   await s.flow.begin(); const pending = s.flow.complete(s.callback());
   await s.flow.disconnect();
-  finish({ id_token: "private", access_token: "private", token_type: "Bearer", scope: "chatgpt.tokens.use.direct" });
+  finish({ id_token: "private", access_token: "private", token_type: "Bearer", scope: "chatgpt.tokens.use.direct resource.invoke" });
   assert.deepEqual(await pending, { ok: false }); assert.equal(s.stored.length, 0);
   assert.equal(s.flow.status().state, "revoked");
 });

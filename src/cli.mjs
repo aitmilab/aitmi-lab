@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, join } from "node:path";
+import { homedir } from "node:os";
+import { signInChatGPT } from "./chatgpt-host.mjs";
+import { signInOpenRouter, checkOpenRouter } from "./openrouter-host.mjs";
+import { checkChatGPT, signOutChatGPT } from "./chatgpt-session.mjs";
+import { openWindowsCredentials, openWindowsBrowser } from "./windows-credentials.mjs";
 import { createProfile, profileView } from "./profile.mjs";
 import { validateManifest } from "./manifest.mjs";
 
@@ -14,9 +19,31 @@ async function readProfile(path) {
 }
 
 async function main() {
-  if (command === "connect") {
-    process.stdout.write("Provider sign-in is unavailable in this CLI. A verified privileged Lab host adapter is required. No provider plan is active.\n");
-    process.exitCode = 1;
+  if (["connect", "check", "disconnect"].includes(command)) {
+    const provider = args[1];
+    if (!["chatgpt", "openrouter"].includes(provider) || process.platform !== "win32") {
+      process.stdout.write("Use: aitmi-lab connect|check|disconnect chatgpt|openrouter (Windows protected companion host).\n");
+      process.exitCode = 1; return;
+    }
+    const directory = join(homedir(), "AppData", "Local", "AITMI-Lab", "credentials");
+    const credentials = await openWindowsCredentials(directory, provider);
+    try {
+      let status;
+      if (command === "connect") {
+        process.stdout.write(`Continue with ${provider === "chatgpt" ? "ChatGPT" : "OpenRouter"} in your browser. This signs in AITMI Lab only.\n`);
+        status = await (provider === "chatgpt" ? signInChatGPT : signInOpenRouter)({ hostId: credentials.hostId, credentials, openBrowser: openWindowsBrowser });
+      } else if (command === "check") {
+        status = await (provider === "chatgpt" ? checkChatGPT : checkOpenRouter)(credentials);
+      } else if (provider === "chatgpt") {
+        status = await signOutChatGPT(credentials);
+      } else {
+        await credentials.remove();
+        status = { provider, state: "revoked", remoteRevocationConfirmed: false };
+        process.stdout.write("The local OpenRouter key was removed. Revoke the key in OpenRouter to end remote access.\n");
+      }
+      process.stdout.write(JSON.stringify(status) + "\n");
+      process.exitCode = ["connected", "revoked"].includes(status.state) ? 0 : 1;
+    } finally { await credentials.close(); }
     return;
   }
   if (command === "validate-tool") {
@@ -51,7 +78,7 @@ async function main() {
     process.stdout.write("Tool template created. Declare capabilities before requesting AI.TMI data.\n");
     return;
   }
-  process.stdout.write("Usage: aitmi-lab init|status|create-tool|validate-tool|connect\n");
+  process.stdout.write("Usage: aitmi-lab init|status|create-tool|validate-tool|connect|check|disconnect\n");
   process.exitCode = 1;
 }
 
