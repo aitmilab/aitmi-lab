@@ -14,8 +14,19 @@ test("tools cannot declare credential, arbitrary path or private history capabil
 });
 test("standalone package uses only built-in or sibling imports", async () => {
   const directory = new URL("../src/", import.meta.url);
-  for (const file of await readdir(directory)) {
-    const source = await readFile(new URL(file, directory), "utf8");
+  async function sourceFiles(root) {
+    const files = [];
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      const target = new URL(entry.name + (entry.isDirectory() ? "/" : ""), root);
+      if (entry.isDirectory()) files.push(...await sourceFiles(target));
+      else if (/\.[cm]?js$/.test(entry.name)) files.push(target);
+    }
+    return files;
+  }
+  const files = await sourceFiles(directory);
+  assert.ok(files.length > 0, "no standalone source files were scanned");
+  for (const file of files) {
+    const source = await readFile(file, "utf8");
     for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) assert.match(match[1], /^(node:|\.\/)/);
   }
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));

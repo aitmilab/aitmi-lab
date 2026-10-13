@@ -1,4 +1,5 @@
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
+import { hasChatGPTPlanInferenceGrant } from "./chatgpt-scopes.mjs";
 
 const RESOURCE = "https://api.openai.com/v1";
 const SCOPES = "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke";
@@ -17,15 +18,18 @@ export function createChatGPTLabFlow({ hostId, redirectUri, openBrowser, exchang
   if (callback.protocol !== "http:" || callback.hostname !== "127.0.0.1" || !callback.port || callback.username || callback.password || callback.search || callback.hash) throw new Error("invalid-lab-callback");
   let attempt = null;
   let status = "unavailable";
+  let reason = null;
   let epoch = 0;
   let preparing = false;
   let completing = false;
   let resetting = false;
   return Object.freeze({
-    status: () => ({ provider: "chatgpt", state: status }),
+    status: () => ({ provider: "chatgpt", state: status, ...(reason ? { reason } : {}) }),
+    cancelAttempt: () => { ++epoch; attempt = null; status = "unavailable"; },
     begin: async () => {
       if (attempt || preparing || completing || resetting) return { ok: false };
       preparing = true;
+      reason = null;
       try {
       const verifier = secret();
       const state = secret();
@@ -43,8 +47,8 @@ export function createChatGPTLabFlow({ hostId, redirectUri, openBrowser, exchang
       for (const [key, value] of Object.entries(values)) url.searchParams.set(key, value);
       status = "awaiting-user";
       try { await openBrowser(url.href); return { ok: true }; }
-      catch { if (epoch === generation) { attempt = null; status = "unavailable"; } return { ok: false }; }
-      } catch { status = "unavailable"; return { ok: false }; }
+      catch { if (epoch === generation) { attempt = null; status = "unavailable"; reason = "browser-unavailable"; } return { ok: false }; }
+      } catch { status = "unavailable"; reason = "sign-in-prepare-failed"; return { ok: false }; }
       finally { preparing = false; }
     },
     complete: async (callbackUrl) => {
@@ -56,24 +60,32 @@ export function createChatGPTLabFlow({ hostId, redirectUri, openBrowser, exchang
       if (["state", "code", "client_id", "error"].some((key) => response.searchParams.getAll(key).length > 1) || !equal(held.state, response.searchParams.get("state"))) return { ok: false };
       attempt = null; // Consume even a failed exchange; codes cannot be replayed.
       status = "unavailable";
+      reason = "callback-incomplete";
       const code = response.searchParams.get("code");
       const clientId = held.clientId ?? response.searchParams.get("client_id");
       if (held.clientId && response.searchParams.has("client_id") && response.searchParams.get("client_id") !== held.clientId) return { ok: false };
-      if (held.expires <= now() || response.searchParams.has("error") || !code || code.length > 4096 || !/^oaiapp_[a-zA-Z0-9_-]+$/.test(clientId ?? "")) return { ok: false };
+      if (response.searchParams.has("error")) { reason = "authorization-not-granted"; return { ok: false }; }
+      if (held.expires <= now() || !code || code.length > 4096 || !/^oaiapp_[a-zA-Z0-9_-]+$/.test(clientId ?? "")) return { ok: false };
       completing = true;
       try {
+        reason = "token-exchange-failed";
         const tokens = await exchange({ grant_type: "authorization_code", client_id: clientId, code, code_verifier: held.verifier, redirect_uri: redirectUri, resource: RESOURCE });
+        reason = "identity-verification-failed";
         const identity = await verifyIdentity(tokens.id_token, { audience: clientId, nonce: held.nonce, issuer: "https://auth.openai.com" });
         if (!identity || typeof identity.sub !== "string" || !identity.sub || epoch !== held.generation) return { ok: false };
-        const granted = typeof tokens.scope === "string" && tokens.scope.split(/\s+/).includes("chatgpt.tokens.use.direct");
+        const selectedSubject = credentials.subject ? await credentials.subject() : null;
+        if (epoch !== held.generation || (selectedSubject !== null && selectedSubject !== identity.sub)) { reason = "account-mismatch"; return { ok: false }; }
+        const granted = hasChatGPTPlanInferenceGrant(tokens.scope);
         if (!granted || typeof tokens.access_token !== "string" || !tokens.access_token || tokens.token_type?.toLowerCase() !== "bearer") {
-          status = "limited"; return { ok: false };
+          status = "limited"; reason = null; return { ok: false };
         }
         // The broker verifies the returning account matches its selected identity.
         // It stores tokens only for Lab and exposes no credential to tools/Core.
+        reason = "credential-store-unavailable";
         await credentials.store({ clientId, subject: identity.sub, tokens });
         if (epoch !== held.generation) { await credentials.remove(); return { ok: false }; }
         status = "connected";
+        reason = null;
         return { ok: true };
       } catch { return { ok: false }; }
       finally { completing = false; }
@@ -82,7 +94,7 @@ export function createChatGPTLabFlow({ hostId, redirectUri, openBrowser, exchang
       if (resetting) return { ok: false };
       resetting = true;
       ++epoch; attempt = null; status = "unavailable";
-      try { await credentials.remove(); status = "revoked"; return { ok: true }; }
+      try { await credentials.remove(); status = "revoked"; reason = null; return { ok: true }; }
       catch { return { ok: false }; }
       finally { resetting = false; }
     },
